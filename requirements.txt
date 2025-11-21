@@ -1,0 +1,11 @@
+streamlit
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+ultralytics
+opencv-python-headless
+numpy
+tqdm
+scikit-learn
+deep_sort_realtime
