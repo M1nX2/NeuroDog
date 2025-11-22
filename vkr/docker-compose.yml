@@ -8,31 +8,15 @@ services:
       dockerfile: Dockerfile
     volumes:
       - .:/var/www
-      - laravel-storage:/var/www/storage
-      - laravel-cache:/var/www/bootstrap/cache
     environment:
       - DB_HOST=mysql
       - DB_DATABASE=laravel
       - DB_USERNAME=root
       - DB_PASSWORD=secret
-      - PHP_UPLOAD_MAX_FILESIZE=500M
-      - PHP_POST_MAX_SIZE=500M
-      - PHP_MAX_EXECUTION_TIME=600
-      - PHP_MEMORY_LIMIT=512M
-    expose:
-      - "9000"
     depends_on:
-      mysql:
-        condition: service_healthy
+      - mysql
     networks:
       - laravel-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "php-fpm -t && ps aux | grep '[p]hp-fpm' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   # Nginx
   webserver:
@@ -43,13 +27,9 @@ services:
       - .:/var/www
       - ./docker/nginx:/etc/nginx/conf.d
     depends_on:
-      app:
-        condition: service_healthy
-      node:
-        condition: service_started
+      - app
     networks:
       - laravel-network
-    restart: unless-stopped
 
   # MySQL
   mysql:
@@ -61,15 +41,6 @@ services:
       - mysql_data:/var/lib/mysql
     networks:
       - laravel-network
-    restart: unless-stopped
-    ports:
-      - "3306:3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psecret"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   # Node.js (для фронтенда)
   node:
@@ -77,21 +48,14 @@ services:
     working_dir: /var/www
     volumes:
       - .:/var/www
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    ports:
-      - "5173:5173"
-    environment:
-      - HOST=0.0.0.0
+    command: sh -c "npm install && npm run dev"
     depends_on:
       - app
     networks:
       - laravel-network
-    restart: unless-stopped
 
 volumes:
   mysql_data:
-  laravel-storage:
-  laravel-cache:
 
 networks:
   laravel-network:

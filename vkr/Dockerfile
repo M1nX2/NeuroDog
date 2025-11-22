@@ -51,10 +51,6 @@ RUN composer install --optimize-autoloader --no-dev --no-scripts
 # Копируем остальные файлы проекта
 COPY . .
 
-# Копируем и делаем исполняемым entrypoint скрипт
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
 # Запускаем скрипты composer (post-install-cmd и т.д.)
 RUN composer dump-autoload --optimize
 
@@ -63,27 +59,3 @@ RUN chown -R www-data:www-data /var/www/storage \
     && chown -R www-data:www-data /var/www/bootstrap/cache \
     && chmod -R 775 /var/www/storage \
     && chmod -R 775 /var/www/bootstrap/cache
-
-# Настройка PHP-FPM для прослушивания на TCP порту 9000
-# Создаем кастомную конфигурацию, которая переопределит listen
-RUN echo '[www]' > /usr/local/etc/php-fpm.d/zz-docker-custom.conf && \
-    echo 'listen = 9000' >> /usr/local/etc/php-fpm.d/zz-docker-custom.conf && \
-    echo 'listen.allowed_clients = 0.0.0.0' >> /usr/local/etc/php-fpm.d/zz-docker-custom.conf
-
-# Также обновляем основной файл www.conf если он существует
-RUN if [ -f /usr/local/etc/php-fpm.d/www.conf ]; then \
-    sed -i 's/^listen = .*/listen = 9000/' /usr/local/etc/php-fpm.d/www.conf 2>/dev/null || true; \
-    sed -i 's/^listen = \/run\/php\/php.*\.sock/listen = 9000/' /usr/local/etc/php-fpm.d/www.conf 2>/dev/null || true; \
-    sed -i 's/^listen = 127\.0\.0\.1:9000/listen = 9000/' /usr/local/etc/php-fpm.d/www.conf 2>/dev/null || true; \
-    if ! grep -q "^listen = 9000" /usr/local/etc/php-fpm.d/www.conf; then \
-        sed -i '/^\[www\]/a listen = 9000' /usr/local/etc/php-fpm.d/www.conf 2>/dev/null || \
-        echo "listen = 9000" >> /usr/local/etc/php-fpm.d/www.conf; \
-    fi; \
-    sed -i 's/^;listen.allowed_clients = .*/listen.allowed_clients = 0.0.0.0/' /usr/local/etc/php-fpm.d/www.conf 2>/dev/null || true; \
-    if ! grep -q "^listen.allowed_clients" /usr/local/etc/php-fpm.d/www.conf; then \
-        echo "listen.allowed_clients = 0.0.0.0" >> /usr/local/etc/php-fpm.d/www.conf; \
-    fi; \
-    fi
-
-# Используем entrypoint скрипт
-ENTRYPOINT ["docker-entrypoint.sh"]
