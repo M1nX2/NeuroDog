@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  # MySQL для фронтенда
+  mysql:
+    image: mysql:8.0
+    container_name: neurodog-mysql
+    environment:
+      - MYSQL_DATABASE=laravel
+      - MYSQL_ROOT_PASSWORD=secret
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - app-network
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psecret"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # Python бэкенд (FastAPI)
   neurodog-backend:
     build:
@@ -26,6 +47,9 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  mysql_data:
 
 networks:
   app-network:
