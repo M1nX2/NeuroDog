@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     libavcodec-dev \
     libavformat-dev \
     libswscale-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Обновление pip и установка зависимостей
@@ -37,6 +38,5 @@ COPY . /app
 WORKDIR /app
 
 # Команда запуска FastAPI
-# Используем переменную PORT из окружения, если доступна (для Railway, Render и др.)
 # По умолчанию используем порт 8000
-CMD uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD python api.py

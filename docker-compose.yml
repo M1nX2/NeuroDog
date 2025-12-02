@@ -2,10 +2,11 @@ version: '3.8'
 
 services:
   # Python бэкенд (FastAPI)
-  python-backend:
+  neurodog-backend:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: neurodog-backend
     ports:
       - "8000:8000"
     volumes:
@@ -19,65 +20,15 @@ services:
     networks:
       - app-network
     restart: unless-stopped
-
-  # Laravel фронтенд (PHP-FPM)
-  laravel-app:
-    build:
-      context: ./vkr
-      dockerfile: Dockerfile
-    volumes:
-      - ./vkr:/var/www
-      - laravel-storage:/var/www/storage
-      - laravel-cache:/var/www/bootstrap/cache
-    environment:
-      - DB_HOST=mysql
-      - DB_DATABASE=laravel
-      - DB_USERNAME=root
-      - DB_PASSWORD=secret
-      - PHP_UPLOAD_MAX_FILESIZE=500M
-      - PHP_POST_MAX_SIZE=500M
-      - PHP_MAX_EXECUTION_TIME=600
-      - PHP_MEMORY_LIMIT=512M
-    depends_on:
-      - mysql
-    networks:
-      - app-network
-    restart: unless-stopped
-
-  # Nginx для Laravel
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "3000:80"
-    volumes:
-      - ./vkr:/var/www
-      - ./vkr/docker/nginx:/etc/nginx/conf.d
-    depends_on:
-      - laravel-app
-    networks:
-      - app-network
-    restart: unless-stopped
-
-  # MySQL для Laravel
-  mysql:
-    image: mysql:8.0
-    environment:
-      - MYSQL_DATABASE=laravel
-      - MYSQL_ROOT_PASSWORD=secret
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks:
-      - app-network
-    restart: unless-stopped
-    ports:
-      - "3306:3306"
-
-volumes:
-  mysql_data:
-  laravel-storage:
-  laravel-cache:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 networks:
   app-network:
+    name: app-network
     driver: bridge
 
