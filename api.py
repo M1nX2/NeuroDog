@@ -9,10 +9,12 @@ from typing import List, Optional
 import tempfile
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import json
 import threading
 from detector import DefecationDetector, dog_detect_model, pose_model, SEQ_LENGTH
+import mysql.connector
+from mysql.connector import Error
 
 app = FastAPI(title="DogsNeuro API", version="1.0.0")
 
@@ -364,6 +366,168 @@ async def get_violations(
     return all_violations
 
 
+def get_db_connection():
+    """Получение подключения к MySQL"""
+    try:
+        conn = mysql.connector.connect(
+            host=os.environ.get('MYSQL_HOST', 'neurodog-mysql'),
+            port=int(os.environ.get('MYSQL_PORT', 3306)),
+            database=os.environ.get('MYSQL_DATABASE', 'laravel'),
+            user=os.environ.get('MYSQL_USER', 'root'),
+            password=os.environ.get('MYSQL_PASSWORD', 'secret'),
+            autocommit=True
+        )
+        return conn
+    except Error as e:
+        print(f"Error connecting to MySQL: {e}")
+        return None
+
+
+@app.post("/api/v1/violations/save")
+async def save_violations(violations: List[ViolationData], video_id: Optional[str] = None):
+    """Сохранение нарушений в базу данных"""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    try:
+        cursor = conn.cursor()
+        saved_count = 0
+        
+        for violation in violations:
+            cursor.execute("""
+                INSERT INTO violations 
+                (time, type, description, source, date, video_id, video_url, breed, muzzle)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                violation.time,
+                violation.type,
+                violation.description,
+                violation.source,
+                violation.date,
+                video_id,
+                violation.video_url,
+                violation.breed,
+                violation.muzzle
+            ))
+            saved_count += 1
+        
+        conn.commit()
+        return {"success": True, "saved": saved_count, "message": f"Saved {saved_count} violations"}
+    except Error as e:
+        print(f"Error saving violations: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+# ВАЖНО: Более специфичные маршруты должны быть ПЕРЕД параметризованными
+# Иначе /api/v1/violations/db будет перехватываться /api/v1/violations/{video_id}
+@app.get("/api/v1/violations/db")
+async def get_violations_from_db(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    video_id: Optional[str] = None
+):
+    """Получение нарушений из базы данных"""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        
+        query = "SELECT * FROM violations WHERE 1=1"
+        params = []
+        
+        if start_date:
+            query += " AND date >= %s"
+            params.append(start_date)
+        
+        if end_date:
+            query += " AND date <= %s"
+            params.append(end_date)
+        
+        if video_id:
+            query += " AND video_id = %s"
+            params.append(video_id)
+        
+        query += " ORDER BY date, time"
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        violations = []
+        for row in rows:
+            violations.append({
+                "id": row.get("id"),
+                "time": row.get("time"),
+                "type": row.get("type"),
+                "description": row.get("description"),
+                "source": row.get("source"),
+                "date": row.get("date").strftime('%Y-%m-%d') if isinstance(row.get("date"), date) else str(row.get("date")),
+                "video_id": row.get("video_id"),
+                "video_url": row.get("video_url"),
+                "breed": row.get("breed"),
+                "muzzle": bool(row.get("muzzle")) if row.get("muzzle") is not None else None,
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None
+            })
+        
+        return {"success": True, "violations": violations, "count": len(violations)}
+    except Error as e:
+        print(f"Error getting violations from DB: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+@app.get("/api/v1/violations/db/{video_id}")
+async def get_video_violations_from_db(video_id: str):
+    """Получение нарушений для конкретного видео из базы данных"""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT * FROM violations 
+            WHERE video_id = %s 
+            ORDER BY date, time
+        """, (video_id,))
+        
+        rows = cursor.fetchall()
+        
+        violations = []
+        for row in rows:
+            violations.append({
+                "id": row.get("id"),
+                "time": row.get("time"),
+                "type": row.get("type"),
+                "description": row.get("description"),
+                "source": row.get("source"),
+                "date": row.get("date").strftime('%Y-%m-%d') if isinstance(row.get("date"), date) else str(row.get("date")),
+                "video_id": row.get("video_id"),
+                "video_url": row.get("video_url"),
+                "breed": row.get("breed"),
+                "muzzle": bool(row.get("muzzle")) if row.get("muzzle") is not None else None
+            })
+        
+        return {"success": True, "violations": violations, "count": len(violations)}
+    except Error as e:
+        print(f"Error getting violations from DB: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
 @app.get("/api/v1/violations/{video_id}", response_model=ProcessingResponse)
 async def get_video_violations(video_id: str):
     """Получение нарушений для конкретного видео"""
@@ -380,6 +544,8 @@ async def get_video_violations(video_id: str):
         processing_time=data.get("processing_time"),
         message=f"Найдено нарушений: {len(violations)}"
     )
+
+
 
 
 @app.get("/api/v1/progress/{video_id}")
