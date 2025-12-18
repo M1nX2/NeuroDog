@@ -61,7 +61,45 @@ if [ -n "$BACKEND_VPN_IP" ]; then
     echo "SNAT configured for responses from backend"
   fi
 else
-  echo "BACKEND_VPN_IP not set, skipping port forwarding"
+  echo "BACKEND_VPN_IP not set, skipping backend port forwarding"
+fi
+
+# Настраиваем проброс порта MySQL через VPN, если указан MYSQL_VPN_IP
+MYSQL_VPN_IP="${MYSQL_VPN_IP:-}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-neurodog-mysql}"
+
+if [ -n "$MYSQL_VPN_IP" ]; then
+  echo "Configuring port forwarding for MySQL: $MYSQL_VPN_IP:$MYSQL_PORT -> $MYSQL_CONTAINER:$MYSQL_PORT"
+  
+  # Получаем IP адрес контейнера MySQL
+  MYSQL_CONTAINER_IP=$(getent hosts $MYSQL_CONTAINER 2>/dev/null | awk '{ print $1 }')
+  
+  if [ -z "$MYSQL_CONTAINER_IP" ]; then
+    echo "Warning: Could not resolve $MYSQL_CONTAINER, skipping MySQL port forwarding"
+    echo "  Make sure MySQL container is running: docker ps | grep $MYSQL_CONTAINER"
+  else
+    echo "MySQL container IP: $MYSQL_CONTAINER_IP"
+    
+    # Настраиваем DNAT для проброса порта MySQL через VPN интерфейс
+    # Запросы к MYSQL_VPN_IP:PORT перенаправляются на MYSQL_CONTAINER_IP:PORT
+    iptables -t nat -A PREROUTING -i tun0 -d "$MYSQL_VPN_IP" -p tcp --dport "$MYSQL_PORT" -j DNAT --to-destination "$MYSQL_CONTAINER_IP:$MYSQL_PORT"
+    iptables -A FORWARD -i tun0 -d "$MYSQL_CONTAINER_IP" -p tcp --dport "$MYSQL_PORT" -j ACCEPT
+    
+    # Настраиваем SNAT для ответов, чтобы они возвращались через VPN интерфейс
+    iptables -t nat -A POSTROUTING -s "$MYSQL_CONTAINER_IP" -p tcp --sport "$MYSQL_PORT" -o tun0 -j SNAT --to-source "$MYSQL_VPN_IP"
+    iptables -A FORWARD -s "$MYSQL_CONTAINER_IP" -p tcp --sport "$MYSQL_PORT" -o tun0 -j ACCEPT
+    
+    echo "✓ MySQL port forwarding configured: $MYSQL_VPN_IP:$MYSQL_PORT -> $MYSQL_CONTAINER_IP:$MYSQL_PORT"
+    echo "✓ SNAT configured for responses from MySQL"
+    
+    # Проверяем, что правила применены
+    echo "Verifying iptables rules..."
+    iptables -t nat -L PREROUTING -n | grep -E "$MYSQL_VPN_IP.*$MYSQL_PORT" && echo "  ✓ DNAT rule found" || echo "  ✗ DNAT rule not found"
+  fi
+else
+  echo "MYSQL_VPN_IP not set, skipping MySQL port forwarding"
+  echo "  Set MYSQL_VPN_IP in NeuroDog-1/.env to enable MySQL port forwarding"
 fi
 
 echo "VPN gateway is ready"

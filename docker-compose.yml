@@ -24,6 +24,11 @@ services:
       - BACKEND_VPN_IP=${BACKEND_VPN_IP:-}
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - BACKEND_CONTAINER=${BACKEND_CONTAINER:-neurodog-backend}
+      # MySQL port forwarding через VPN
+      # Если MYSQL_VPN_IP задан в .env, настраивается проброс порта 3306
+      - MYSQL_VPN_IP=${MYSQL_VPN_IP:-}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_CONTAINER=${MYSQL_CONTAINER:-neurodog-mysql}
     restart: "no"  # Не перезапускаем автоматически, если конфига нет
     networks:
       - app-network

@@ -132,6 +132,13 @@ echo "   2. OR configure port forwarding through VPN"
 echo "   3. Current setup: Backend is accessible on localhost:8000 and Docker network only"
 echo ""
 
+# Инициализация базы данных (создание таблиц, если их нет)
+if [ -f "/app/init_db.py" ]; then
+  echo "Initializing database..."
+  python /app/init_db.py || echo "Warning: Database initialization failed, continuing anyway..."
+  echo ""
+fi
+
 # Запускаем FastAPI
 exec python api.py
 

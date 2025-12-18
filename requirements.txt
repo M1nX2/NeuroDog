@@ -9,3 +9,4 @@ numpy
 tqdm
 scikit-learn
 deep_sort_realtime
+mysql-connector-python
