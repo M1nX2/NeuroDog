@@ -1,12 +1,14 @@
+numpy>=1.21.0,<2.0.0
 streamlit
 fastapi
 uvicorn[standard]
 python-multipart
 pydantic
-ultralytics
-opencv-python-headless
-numpy
 tqdm
 scikit-learn
+opencv-python-headless
 deep_sort_realtime
 mysql-connector-python
+torch>=2.0.0,<2.3.0
+torchvision>=0.15.0,<0.18.0
+ultralytics>=8.0.0

@@ -28,9 +28,6 @@ RUN pip install --upgrade pip setuptools wheel
 COPY requirements.txt /app/requirements.txt
 WORKDIR /app
 
-# Установка PyTorch из официального индекса (CPU версия для меньшего размера)
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
 # Установка остальных зависимостей из requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 

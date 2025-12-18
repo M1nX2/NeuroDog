@@ -1,6 +1,11 @@
 import os
+# Явно отключаем CUDA и используем только CPU (должно быть до импорта torch)
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
 import cv2
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    raise ImportError("numpy is not installed. Please install it with: pip install numpy>=1.21.0")
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
@@ -17,9 +22,11 @@ SEQ_LENGTH = 120
 ALL_DIST_PAIRS = list(itertools.combinations(range(NUM_KEYPOINTS), 2))
 ALL_ANGLE_TRIPLES = list(itertools.combinations(range(NUM_KEYPOINTS), 3))
 
-# Загрузка моделей (относительные пути для Docker)
+# Загрузка моделей (относительные пути для Docker) - явно указываем CPU
 pose_model = YOLO("models/dog_pose_model_yolo8_14.pt")
+pose_model.to('cpu')
 dog_detect_model = YOLO("models/dog_detect_model_yolo8_450ep.pt")
+dog_detect_model.to('cpu')
 
 
 class LSTMPoseClassifier(nn.Module):
@@ -109,11 +116,15 @@ class DefecationDetector:
     def __init__(self, lstm_path, dog_detect_model, pose_model, window_size=SEQ_LENGTH, threshold=0.7, smooth=5, progress_callback=None, frame_skip=1):
         self.device = DEVICE
         
-        # Загрузка моделей
+        # Загрузка моделей - явно указываем использование CPU
         self.dog_detect_model = dog_detect_model
+        self.dog_detect_model.to('cpu')
         self.pose_model = pose_model
+        self.pose_model.to('cpu')
         self.human_detect_model = YOLO("yolov8n.pt")
+        self.human_detect_model.to('cpu')
         self.human_pose_model = YOLO("yolov8s-pose.pt")
+        self.human_pose_model.to('cpu')
         
         self.net = self._load_lstm(lstm_path)
         self.window = deque(maxlen=window_size)
