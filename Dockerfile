@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y \
     libavformat-dev \
     libswscale-dev \
     curl \
+    iproute2 \
+    iptables \
+    net-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Обновление pip и установка зависимостей
@@ -34,9 +37,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем весь проект внутрь контейнера
 COPY . /app
 
+# Копируем entrypoint скрипт
+COPY entrypoint.sh /usr/local/bin/neurodog-entrypoint.sh
+RUN chmod +x /usr/local/bin/neurodog-entrypoint.sh
+
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Команда запуска FastAPI
-# По умолчанию используем порт 8000
-CMD python api.py
+# Используем entrypoint для настройки VPN маршрутов перед запуском
+ENTRYPOINT ["/usr/local/bin/neurodog-entrypoint.sh"]

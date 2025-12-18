@@ -1,6 +1,35 @@
 version: '3.8'
 
 services:
+  # OpenVPN клиент для доступа к удалённым ресурсам через VPN
+  # Опциональный сервис: если ./config/client.ovpn отсутствует, контейнер завершится успешно
+  openvpn-client:
+    build:
+      context: ./openvpn-client
+      dockerfile: Dockerfile
+    container_name: neurodog-openvpn-client
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./config:/config:ro
+    env_file:
+      - .env
+    environment:
+      - OPENVPN_CONFIG=/config/client.ovpn
+      - OPENVPN_ARGS=
+      # Backend port forwarding через VPN
+      # Если BACKEND_VPN_IP задан в .env, настраивается проброс порта
+      - BACKEND_VPN_IP=${BACKEND_VPN_IP:-}
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - BACKEND_CONTAINER=${BACKEND_CONTAINER:-neurodog-backend}
+    restart: "no"  # Не перезапускаем автоматически, если конфига нет
+    networks:
+      - app-network
+    sysctls:
+      - net.ipv4.ip_forward=1
+
   # MySQL для фронтенда
   mysql:
     image: mysql:8.0
@@ -36,11 +65,26 @@ services:
       - ./api.py:/app/api.py
       - ./detector.py:/app/detector.py
       - ./requirements.txt:/app/requirements.txt
+    env_file:
+      - .env
     environment:
-      - PYTHONUNBUFFERED=1
+      - PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
+      # MySQL настройки (локально или через VPN)
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-laravel}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-secret}
+      # VPN Gateway (используем DNS-имя контейнера)
+      - VPN_GATEWAY=${VPN_GATEWAY:-openvpn-client}
+      # VPN Routes (подсети для маршрутизации через VPN, через запятую)
+      - VPN_ROUTES=${VPN_ROUTES:-}
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    # depends_on убран - бэкэнд может работать без VPN
     networks:
       - app-network
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
