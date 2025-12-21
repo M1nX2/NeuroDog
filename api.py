@@ -1,7 +1,7 @@
 """
 FastAPI сервис для обработки видео и детекции нарушений
 """
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
@@ -12,11 +12,16 @@ from pathlib import Path
 from datetime import datetime, date
 import json
 import threading
+import sys
 from detector import DefecationDetector, dog_detect_model, pose_model, SEQ_LENGTH
 import mysql.connector
 from mysql.connector import Error
 
 app = FastAPI(title="DogsNeuro API", version="1.0.0")
+
+# Отключаем access logs (логи HTTP запросов) для uvicorn
+import logging
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # CORS для работы с Laravel фронтендом
 app.add_middleware(
@@ -33,6 +38,7 @@ import threading
 progress_lock = threading.Lock()
 results_storage = {}
 progress_storage = {}  # Хранилище прогресса обработки по video_id
+cancel_flags = {}  # Флаги отмены обработки по video_id
 output_dir = Path("output")
 output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -99,10 +105,19 @@ async def health():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 
-def process_video_sync(video_id: str, input_path: str, output_path: Path, filename: str):
+def process_video_sync(video_id: str, input_path: str, output_path: Path, filename: str, client_ip: str = None):
     """Синхронная обработка видео в отдельном потоке"""
     try:
-        # Callback для обновления прогресса
+        # Инициализируем флаг отмены как False
+        with progress_lock:
+            cancel_flags[video_id] = False
+        
+        # Логируем начало обработки
+        ip_info = f" от IP {client_ip}" if client_ip else ""
+        sys.stdout.write(f"[INFO] Обработка видео {video_id} (файл: {filename}) началась{ip_info}\n")
+        sys.stdout.flush()
+        
+        # Callback для обновления прогресса (без избыточного логирования)
         def update_progress(percent, total_frames, status):
             try:
                 progress_data = {
@@ -111,22 +126,17 @@ def process_video_sync(video_id: str, input_path: str, output_path: Path, filena
                     "total_frames": total_frames,
                     "status": status or "Обработка..."
                 }
-                # Безопасное обновление из потока
+                # Безопасное обновление из потока (без логирования каждого процента)
                 with progress_lock:
                     progress_storage[video_id] = progress_data
-                # Логируем для отладки (выводим в stdout, чтобы было видно в docker logs)
-                import sys
-                sys.stdout.write(f"[PROGRESS] {video_id}: {percent}% ({progress_data['current_frame']}/{total_frames}) - {status}\n")
-                sys.stdout.flush()
             except Exception as e:
-                import sys
                 sys.stdout.write(f"[ERROR] Ошибка обновления прогресса для {video_id}: {e}\n")
                 sys.stdout.flush()
         
-        # Обработка видео с callback прогресса
-        import sys
-        sys.stdout.write(f"[PROCESS] Создаю детектор с callback для {video_id}\n")
-        sys.stdout.flush()
+        # Callback для проверки отмены
+        def check_cancel():
+            with progress_lock:
+                return cancel_flags.get(video_id, False)
         
         from detector import DefecationDetector
         # frame_skip=2 означает обрабатывать каждый 2-й кадр (ускоряет в ~2 раза)
@@ -139,14 +149,47 @@ def process_video_sync(video_id: str, input_path: str, output_path: Path, filena
             threshold=0.8,
             smooth=5,
             progress_callback=update_progress,
-            frame_skip=2  # Обрабатываем каждый 2-й кадр для ускорения (~2x быстрее)
+            frame_skip=2,  # Обрабатываем каждый 2-й кадр для ускорения (~2x быстрее)
+            cancel_callback=check_cancel  # Добавляем callback для проверки отмены
         )
         
-        sys.stdout.write(f"[PROCESS] Детектор создан, callback установлен: {detector.progress_callback is not None}\n")
-        sys.stdout.flush()
-        
         start_time = datetime.now()
-        detector.run_video(str(input_path), str(output_path))
+        try:
+            detector.run_video(str(input_path), str(output_path))
+        except (InterruptedError, KeyboardInterrupt) as cancel_exception:
+            # Проверяем, была ли отмена
+            with progress_lock:
+                if cancel_flags.get(video_id, False):
+                    # Отмена была запрошена
+                    sys.stdout.write(f"[INFO] Обработка видео {video_id} отменена пользователем\n")
+                    sys.stdout.flush()
+                    
+                    # Обновляем прогресс
+                    progress_storage[video_id] = {
+                        "percent": 0,
+                        "status": "Обработка отменена",
+                        "completed": False,
+                        "cancelled": True
+                    }
+                    
+                    # Удаляем временные файлы
+                    try:
+                        os.unlink(input_path)
+                    except:
+                        pass
+                    try:
+                        if output_path.exists():
+                            output_path.unlink()
+                    except:
+                        pass
+                    
+                    # Удаляем флаг отмены и результаты
+                    cancel_flags.pop(video_id, None)
+                    results_storage.pop(video_id, None)
+                    return  # Выходим без сохранения результатов
+            # Если это не отмена, пробрасываем исключение дальше
+            raise
+        
         processing_time = (datetime.now() - start_time).total_seconds()
         
         # Извлекаем информацию о нарушениях из детектора
@@ -219,15 +262,16 @@ def process_video_sync(video_id: str, input_path: str, output_path: Path, filena
         except:
             pass
         
-        # Обновляем прогресс на 100%
+        # Удаляем флаг отмены (обработка завершена успешно)
+        processing_time_seconds = processing_time
         with progress_lock:
+            cancel_flags.pop(video_id, None)
             progress_storage[video_id] = {
                 "percent": 100,
                 "status": "Обработка завершена!",
                 "completed": True
             }
-        import sys
-        sys.stdout.write(f"[PROGRESS] {video_id}: 100% - Обработка завершена!\n")
+        sys.stdout.write(f"[INFO] Обработка видео {video_id} завершена успешно (время: {processing_time_seconds:.1f}с)\n")
         sys.stdout.flush()
     except Exception as e:
         with progress_lock:
@@ -237,22 +281,33 @@ def process_video_sync(video_id: str, input_path: str, output_path: Path, filena
                 "completed": False,
                 "error": str(e)
             }
-        import sys
-        sys.stdout.write(f"[ERROR] Ошибка обработки {video_id}: {e}\n")
+        sys.stdout.write(f"[ERROR] Ошибка обработки видео {video_id}: {e}\n")
         sys.stdout.flush()
         # Удаляем временный файл при ошибке
         try:
             os.unlink(input_path)
         except:
             pass
+        # Удаляем флаг отмены при ошибке
+        with progress_lock:
+            cancel_flags.pop(video_id, None)
 
 
 @app.post("/api/v1/process-video", response_model=ProcessingResponse)
-async def process_video(file: UploadFile = File(...)):
+async def process_video(file: UploadFile = File(...), request: Request = None):
     """
     Обработка загруженного видео (запускается асинхронно)
     """
     try:
+        # Получаем IP адрес клиента
+        client_ip = None
+        if request:
+            client_ip = request.client.host if request.client else None
+            # Проверяем заголовки для получения реального IP (если используется прокси)
+            forwarded_for = request.headers.get("X-Forwarded-For")
+            if forwarded_for:
+                client_ip = forwarded_for.split(",")[0].strip()
+        
         # Проверка формата файла
         if not file.filename:
             raise HTTPException(status_code=400, detail="Файл не указан")
@@ -283,21 +338,20 @@ async def process_video(file: UploadFile = File(...)):
                 "total_frames": 0,
                 "status": "Инициализация..."
             }
-        import sys
-        sys.stdout.write(f"[API] Инициализирован прогресс для {video_id}\n")
+        
+        # Логируем запрос на обработку
+        ip_info = f" от IP {client_ip}" if client_ip else ""
+        sys.stdout.write(f"[INFO] Поступил запрос на обработку видео: {file.filename} (ID: {video_id}){ip_info}\n")
         sys.stdout.flush()
         
         # Запускаем обработку в отдельном потоке (асинхронно)
         thread = threading.Thread(
             target=process_video_sync,
-            args=(video_id, input_path, output_path, file.filename),
+            args=(video_id, input_path, output_path, file.filename, client_ip),
             name=f"VideoProcessing-{video_id}"
         )
         thread.daemon = True
         thread.start()
-        import sys
-        sys.stdout.write(f"[API] Запущен поток обработки для {video_id}\n")
-        sys.stdout.flush()
         
         # Сразу возвращаем video_id, обработка идет в фоне
         return ProcessingResponse(
@@ -557,8 +611,6 @@ async def get_progress(video_id: str):
         has_progress = video_id in progress_storage
     
     import sys
-    sys.stdout.write(f"[API] Запрос прогресса для {video_id}, доступные: {available_ids}\n")
-    sys.stdout.flush()
     
     if not has_progress:
         # Если прогресс не найден, но есть результат - обработка завершена
@@ -587,10 +639,30 @@ async def get_progress(video_id: str):
         "status": progress.get("status", "Обработка..."),
         "completed": progress.get("percent", 0) >= 100
     }
-    import sys
-    sys.stdout.write(f"[API] Возвращаем прогресс для {video_id}: {response_data}\n")
-    sys.stdout.flush()
     return response_data
+
+
+@app.post("/api/v1/cancel/{video_id}")
+async def cancel_processing(video_id: str):
+    """Отмена обработки видео"""
+    with progress_lock:
+        # Проверяем, существует ли задача
+        if video_id not in progress_storage and video_id not in results_storage:
+            raise HTTPException(status_code=404, detail="Видео не найдено")
+        
+        # Устанавливаем флаг отмены
+        cancel_flags[video_id] = True
+        
+        # Обновляем статус прогресса
+        if video_id in progress_storage:
+            progress_storage[video_id]["status"] = "Отмена обработки..."
+            progress_storage[video_id]["cancelled"] = True
+    
+    import sys
+    sys.stdout.write(f"[INFO] Запрошена отмена обработки видео {video_id}\n")
+    sys.stdout.flush()
+    
+    return {"success": True, "message": "Обработка отменена"}
 
 
 @app.delete("/api/v1/video/{video_id}")
@@ -615,6 +687,11 @@ async def delete_video(video_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+    import logging
+    
+    # Отключаем access logs (логи HTTP запросов)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, access_log=False)
 

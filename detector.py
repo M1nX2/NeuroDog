@@ -9,7 +9,6 @@ except ImportError:
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
-from tqdm import tqdm
 import itertools
 import math
 from collections import deque
@@ -22,11 +21,91 @@ SEQ_LENGTH = 120
 ALL_DIST_PAIRS = list(itertools.combinations(range(NUM_KEYPOINTS), 2))
 ALL_ANGLE_TRIPLES = list(itertools.combinations(range(NUM_KEYPOINTS), 3))
 
-# Загрузка моделей (относительные пути для Docker) - явно указываем CPU
-pose_model = YOLO("models/dog_pose_model_yolo8_14.pt")
-pose_model.to('cpu')
-dog_detect_model = YOLO("models/dog_detect_model_yolo8_450ep.pt")
-dog_detect_model.to('cpu')
+
+def load_or_download_yolo_model(model_name: str, models_dir: str = "models"):
+    """
+    Загружает модель YOLO из папки models, если она там есть.
+    Если модели нет - скачивает её и сохраняет в папку models.
+    
+    Args:
+        model_name: Имя модели (например "yolov8n.pt" или "dog_pose_model_yolo8_14.pt")
+        models_dir: Директория для хранения моделей (по умолчанию "models")
+    
+    Returns:
+        Загруженная модель YOLO
+    """
+    from pathlib import Path
+    import shutil
+    
+    # Создаем папку models, если её нет
+    os.makedirs(models_dir, exist_ok=True)
+    
+    # Полный путь к файлу модели
+    model_path = os.path.join(models_dir, model_name)
+    model_path_obj = Path(model_path)
+    
+    # Проверяем, существует ли модель в папке models
+    if model_path_obj.exists():
+        # Модель найдена, загружаем оттуда
+        return YOLO(str(model_path))
+    
+    # Модель не найдена, скачиваем через YOLO
+    # YOLO автоматически скачает модель в кэш при первом вызове
+    temp_model = YOLO(model_name)
+    
+    # Пытаемся найти скачанную модель в кэше ultralytics
+    # Проверяем атрибуты модели для получения пути к файлу
+    source_path = None
+    
+    # Вариант 1: проверяем ckpt_path (путь к чекпоинту модели)
+    if hasattr(temp_model, 'ckpt_path') and temp_model.ckpt_path:
+        source_path = Path(temp_model.ckpt_path)
+        if not source_path.exists():
+            source_path = None
+    
+    # Вариант 2: проверяем стандартные места кэша ultralytics
+    if source_path is None or not source_path.exists():
+        cache_dirs = [
+            Path.home() / ".ultralytics" / "weights",
+            Path.cwd() / "weights",
+        ]
+        
+        for cache_dir in cache_dirs:
+            cached_model_path = cache_dir / model_name
+            if cached_model_path.exists():
+                source_path = cached_model_path
+                break
+    
+    # Копируем модель в нашу папку models
+    if source_path and source_path.exists():
+        try:
+            shutil.copy2(source_path, model_path)
+            # Загружаем модель из нашей папки
+            return YOLO(str(model_path))
+        except Exception as e:
+            # Если не удалось скопировать (например, read-only файловая система),
+            # используем модель из памяти
+            print(f"⚠ Не удалось сохранить модель {model_name} в {models_dir}: {e}")
+            return temp_model
+    else:
+        # Не удалось найти файл модели, используем загруженную модель из памяти
+        print(f"⚠ Не удалось найти файл модели {model_name} в кэше, используем из памяти")
+        return temp_model
+
+
+# Загрузка кастомных моделей (они должны быть в папке models)
+# Если их нет - будет ошибка, так как это кастомные обученные модели
+try:
+    pose_model = load_or_download_yolo_model("dog_pose_model_yolo8_14.pt")
+    pose_model.to('cpu')
+except Exception as e:
+    raise RuntimeError(f"Ошибка загрузки модели dog_pose_model_yolo8_14.pt: {e}")
+
+try:
+    dog_detect_model = load_or_download_yolo_model("dog_detect_model_yolo8_450ep.pt")
+    dog_detect_model.to('cpu')
+except Exception as e:
+    raise RuntimeError(f"Ошибка загрузки модели dog_detect_model_yolo8_450ep.pt: {e}")
 
 
 class LSTMPoseClassifier(nn.Module):
@@ -113,7 +192,7 @@ def extract_structured_features(keypoints):
 
 
 class DefecationDetector:
-    def __init__(self, lstm_path, dog_detect_model, pose_model, window_size=SEQ_LENGTH, threshold=0.7, smooth=5, progress_callback=None, frame_skip=1):
+    def __init__(self, lstm_path, dog_detect_model, pose_model, window_size=SEQ_LENGTH, threshold=0.7, smooth=5, progress_callback=None, frame_skip=1, cancel_callback=None):
         self.device = DEVICE
         
         # Загрузка моделей - явно указываем использование CPU
@@ -121,9 +200,10 @@ class DefecationDetector:
         self.dog_detect_model.to('cpu')
         self.pose_model = pose_model
         self.pose_model.to('cpu')
-        self.human_detect_model = YOLO("yolov8n.pt")
+        # Загружаем стандартные YOLO модели с проверкой наличия в models/
+        self.human_detect_model = load_or_download_yolo_model("yolov8n.pt")
         self.human_detect_model.to('cpu')
-        self.human_pose_model = YOLO("yolov8s-pose.pt")
+        self.human_pose_model = load_or_download_yolo_model("yolov8s-pose.pt")
         self.human_pose_model.to('cpu')
         
         self.net = self._load_lstm(lstm_path)
@@ -132,6 +212,7 @@ class DefecationDetector:
         self.smooth = smooth
         self.hist = []
         self.progress_callback = progress_callback  # Callback для обновления прогресса
+        self.cancel_callback = cancel_callback  # Callback для проверки отмены
         self.frame_skip = frame_skip  # Пропускать каждый N-й кадр для ускорения (1 = обрабатывать все кадры)
         
         # Инициализация всех атрибутов состояния
@@ -404,7 +485,6 @@ class DefecationDetector:
         return vis_frame
 
     def run_video(self, in_path, out_path=None):
-        print(f"🔍 Processing video: {in_path}")
         cap = cv2.VideoCapture(in_path)
         
         if not cap.isOpened():
@@ -431,25 +511,16 @@ class DefecationDetector:
         writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), self.fps,
                                 (int(cap.get(3)), int(cap.get(4)))) if out_path else None
         
-        # Отключаем tqdm для Streamlit (прогресс показывается в интерфейсе)
-        import sys
-        is_streamlit = 'streamlit' in sys.modules
-        pbar = tqdm(total=total_frames, desc="Processing frames", unit="frame", disable=is_streamlit)
+        # Прогресс показывается через callback, tqdm не используется
         frame_count = 0  # счетчик кадров
         
         # Вызываем callback для начального прогресса (0%)
         if self.progress_callback:
             try:
-                import sys
-                sys.stdout.write(f"[DETECTOR] Вызываю начальный callback: 0% из {total_frames} кадров\n")
-                sys.stdout.flush()
                 self.progress_callback(0, total_frames, f"Начало обработки видео... Всего кадров: {total_frames}")
-                sys.stdout.write(f"[DETECTOR] Начальный callback выполнен успешно\n")
-                sys.stdout.flush()
             except Exception as e:
-                import sys
-                sys.stdout.write(f"[DETECTOR ERROR] Ошибка в начальном callback: {e}\n")
-                sys.stdout.flush()
+                # Ошибка callback не критична, просто продолжаем обработку
+                pass
         
         # Инициализация переменной для времени с момента дефекации
         time_since_defecation_frames = 0
@@ -457,6 +528,10 @@ class DefecationDetector:
         
         try:
             while True:
+                # Проверяем отмену обработки
+                if self.cancel_callback and self.cancel_callback():
+                    raise InterruptedError("Обработка видео отменена пользователем")
+                
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -469,7 +544,6 @@ class DefecationDetector:
                     elif writer:
                         writer.write(frame)  # Если нет обработанного кадра, пишем оригинал
                     frame_count += 1
-                    pbar.update(1)
                     continue
                 
                 vis_frame = self.process_frame(frame, frame_count)
@@ -480,10 +554,9 @@ class DefecationDetector:
                     progress_percent = min(int((frame_count + 1) / total_frames * 100), 99)  # Максимум 99% до завершения
                     try:
                         self.progress_callback(progress_percent, total_frames, f"Обработка кадра {frame_count + 1} из {total_frames}")
-                    except Exception as e:
-                        import sys
-                        sys.stdout.write(f"[DETECTOR ERROR] Ошибка в callback прогресса: {e}\n")
-                        sys.stdout.flush()
+                    except Exception:
+                        # Ошибка callback не критична, просто продолжаем обработку
+                        pass
                 
                 if len(self.window) == self.window.maxlen:
                     seq = torch.tensor(np.array(self.window), dtype=torch.float32).unsqueeze(0).to(self.device)
@@ -677,7 +750,6 @@ class DefecationDetector:
                     if cv2.waitKey(1) == ord('q'):
                         break
                 
-                pbar.update(1)
                 frame_count += 1  # увеличиваем счетчик кадров
         
         finally:
@@ -690,8 +762,9 @@ class DefecationDetector:
             if self.progress_callback:
                 try:
                     self.progress_callback(100, total_frames, "Обработка завершена!")
-                except Exception as e:
-                    print(f"Ошибка в финальном callback: {e}")
+                except Exception:
+                    # Ошибка callback не критична
+                    pass
             
             cap.release()
             if writer:
@@ -700,7 +773,6 @@ class DefecationDetector:
                 cv2.destroyAllWindows()
             except:
                 pass  # Игнорируем ошибки в Streamlit
-            pbar.close()
         
         # Не выводим print в Streamlit, чтобы не засорять интерфейс
         # print(f"✅ Processing completed. Total frames: {total_frames}")

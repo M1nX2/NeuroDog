@@ -65,7 +65,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./models:/app/models:ro
+      - ./models:/app/models
       - ./output:/app/output
       - ./api.py:/app/api.py
       - ./detector.py:/app/detector.py
